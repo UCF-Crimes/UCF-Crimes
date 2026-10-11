@@ -223,15 +223,29 @@ def google_geocoder(address: str, google_maps_api_key: str) -> tuple[float, floa
         if phrase in address:
             return KEY_PHRASES[phrase]
 
-    result = requests.get(endpoint, params=params)
+    try:
+        result = requests.get(endpoint, params=params, timeout=30)
+        if result.status_code not in range(200, 299):
+            print(f"Geocoding failed for {address!r}: HTTP {result.status_code}")
+            return None, None
 
-    if result.status_code not in range(200, 299) or result.json()['status'] == 'ZERO_RESULTS':
-        # Request failed or no results found
-        return None, None
-    else:
-        # Return lat, lng
-        lat, lng = result.json()['results'][0]['geometry']['location'].values()
-        return round(lat, 7), round(lng, 7)
+        data = result.json()
+        if not isinstance(data, dict):
+            raise ValueError("Expected a JSON object")
+        if data.get('status') != 'OK':
+            print(f"Geocoding failed for {address!r}: "
+                  f"{data.get('status')} - {data.get('error_message', 'No error message provided')}")
+            return None, None
+
+        location = data['results'][0]['geometry']['location']
+        return round(location['lat'], 7), round(location['lng'], 7)
+    except requests.exceptions.RequestException as error:
+        # Request exception messages can include the URL and API key.
+        print(f"Geocoding request failed for {address!r}: {type(error).__name__}")
+    except (IndexError, KeyError, TypeError, ValueError) as error:
+        print(f"Invalid geocoding response for {address!r}: {error}")
+
+    return None, None
 
 def haversine_form(latitude_center: float, longitude_center: float, latitude_place: float, longitude_place: float) -> float:
     lat1 = radians(latitude_center)
@@ -345,7 +359,7 @@ def address_to_place(address: str,
         if is_match:
             return locations[key]
     
-    if (place_name := get_place_name(lat, lng, GMAPS_API_KEY)):
+    if lat is not None and lng is not None and (place_name := get_place_name(lat, lng, GMAPS_API_KEY)):
             print(place_name)
             return f"near {place_name}"
     
