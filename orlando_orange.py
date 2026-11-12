@@ -25,83 +25,92 @@ def load_orlando_active(engine: Engine) -> None:
     '''
     Load XML file from Orlando PD website with BeautifulSoup and parse the file to SQL table.
     '''
-    
-    connection = engine.connect()
 
-    active_req = requests.get('https://www1.cityoforlando.net/opd/activecalls/activecadpolice.xml')
+    # Fetch and parse the feed before checking out a DB connection, so a slow or failed request
+    # never holds a connection.
+    active_req = requests.get('https://www1.cityoforlando.net/opd/activecalls/activecadpolice.xml', timeout=30)
     soup = BeautifulSoup(active_req.content, "lxml-xml")
     active_dict = xmltodict.parse(str(soup))
-        
-    for crime in active_dict["CALLS"]["CALL"]:
-        try:
-            print(crime)
-            query = f"""SELECT * FROM orlando_crimes WHERE incident = '{crime["@incident"]}'"""
-            result = connection.execute(text(query))
 
-            if result.rowcount == 0:
-                query = f"""INSERT INTO orlando_crimes (incident, date, description, location, district)""" \
-                        f"""VALUES ('{crime['@incident']}', '{crime['DATE']}', '{crime['DESC']}', '{crime['LOCATION'].replace("'", "''")}', '{crime['DISTRICT']}')"""
+    # The context manager returns the connection to the pool even if an exception escapes.
+    with engine.connect() as connection:
+        for crime in active_dict["CALLS"]["CALL"]:
+            try:
+                print(crime)
+                query = f"""SELECT * FROM orlando_crimes WHERE incident = '{crime["@incident"]}'"""
+                result = connection.execute(text(query))
 
-            else:
-                query = f"""UPDATE orlando_crimes SET date = '{crime['DATE']}', description = '{crime['DESC']}', """ \
-                        f"""location = '{crime['LOCATION'].replace("'", "''")}', district = '{crime['DISTRICT']}' WHERE incident = '{crime['@incident']}'"""
-                
-            connection.execute(text(query))
-            connection.commit()
+                if result.rowcount == 0:
+                    query = f"""INSERT INTO orlando_crimes (incident, date, description, location, district)""" \
+                            f"""VALUES ('{crime['@incident']}', '{crime['DATE']}', '{crime['DESC']}', '{crime['LOCATION'].replace("'", "''")}', '{crime['DISTRICT']}')"""
 
-        except Exception as e:
-            print(f"Exception occurred: {type(e).__name__}: {str(e)}")
-            # traceback.print_exc()
+                else:
+                    query = f"""UPDATE orlando_crimes SET date = '{crime['DATE']}', description = '{crime['DESC']}', """ \
+                            f"""location = '{crime['LOCATION'].replace("'", "''")}', district = '{crime['DISTRICT']}' WHERE incident = '{crime['@incident']}'"""
 
-    query = f"SELECT count(*) AS exact_count FROM orlando_crimes"
-    result = connection.execute(text(query)).fetchone()
-    print("Orlando crimes database updated.")
-    print(f"Current number of entries in database: {result[0]}")
-    connection.close()
+                connection.execute(text(query))
+                connection.commit()
+
+            except Exception as e:
+                # Roll back so one failed statement doesn't leave the transaction aborted for
+                # every remaining row and the count query below.
+                connection.rollback()
+                print(f"Exception occurred: {type(e).__name__}: {str(e)}")
+                # traceback.print_exc()
+
+        query = f"SELECT count(*) AS exact_count FROM orlando_crimes"
+        result = connection.execute(text(query)).fetchone()
+        print("Orlando crimes database updated.")
+        print(f"Current number of entries in database: {result[0]}")
 
 def load_orange_active(engine: Engine) -> None:
     '''
     Load XML file from OCSO website with BeautifulSoup and parse the file to SQL table.
     '''
-    connection = engine.connect()
 
-    r = requests.get('https://www.ocso.com/Portals/0/CFS_FEED/activecalls.xml')
+    # Fetch and parse the feed before checking out a DB connection, so a slow or failed request
+    # never holds a connection.
+    r = requests.get('https://www.ocso.com/Portals/0/CFS_FEED/activecalls.xml', timeout=30)
     soup = BeautifulSoup(r.content, "lxml-xml")
     active_dict = xmltodict.parse(str(soup))
 
-    for crime in active_dict["CALLS"]["CALL"]:
-        try:
-            print(crime)
-            year_date = datetime.strptime(crime["ENTRYTIME"], "%m/%d/%Y %I:%M:%S %p").strftime("%Y-%j")
-            entrytime = datetime.strptime(crime["ENTRYTIME"], "%m/%d/%Y %I:%M:%S %p").strftime("%-m/%d/%Y %H:%M:%S")
-            expanded_incident = f"{year_date}-{crime['@INCIDENT']}"
-            query = f"""SELECT * FROM orange_crimes WHERE incident = '{expanded_incident}'"""
-            result = connection.execute(text(query))
-            if crime['LOCATION']:
-                location = crime['LOCATION'].replace("'", "''")
-            else:
-                location = crime['LOCATION']
+    # The context manager returns the connection to the pool even if an exception escapes.
+    with engine.connect() as connection:
+        for crime in active_dict["CALLS"]["CALL"]:
+            try:
+                print(crime)
+                year_date = datetime.strptime(crime["ENTRYTIME"], "%m/%d/%Y %I:%M:%S %p").strftime("%Y-%j")
+                entrytime = datetime.strptime(crime["ENTRYTIME"], "%m/%d/%Y %I:%M:%S %p").strftime("%-m/%d/%Y %H:%M:%S")
+                expanded_incident = f"{year_date}-{crime['@INCIDENT']}"
+                query = f"""SELECT * FROM orange_crimes WHERE incident = '{expanded_incident}'"""
+                result = connection.execute(text(query))
+                if crime['LOCATION']:
+                    location = crime['LOCATION'].replace("'", "''")
+                else:
+                    location = crime['LOCATION']
 
-            if result.rowcount == 0:
-                query = f"""INSERT INTO orange_crimes (incident, entrytime, description, location, sector, zone, rd)""" \
-                        f"""VALUES ('{expanded_incident}', '{entrytime}', '{crime['DESC']}', '{location}', '{crime['SECTOR']}', '{crime["ZONE"]}', '{crime["RD"]}')"""
+                if result.rowcount == 0:
+                    query = f"""INSERT INTO orange_crimes (incident, entrytime, description, location, sector, zone, rd)""" \
+                            f"""VALUES ('{expanded_incident}', '{entrytime}', '{crime['DESC']}', '{location}', '{crime['SECTOR']}', '{crime["ZONE"]}', '{crime["RD"]}')"""
 
-            else:
-                query = f"""UPDATE orange_crimes SET entrytime = '{entrytime}', description = '{crime['DESC']}', """ \
-                        f"""location = '{location}', sector = '{crime['SECTOR']}', zone = '{crime["ZONE"]}', rd = '{crime["RD"]}' WHERE incident = '{expanded_incident}'"""
-                
-            connection.execute(text(query))
-            connection.commit()
+                else:
+                    query = f"""UPDATE orange_crimes SET entrytime = '{entrytime}', description = '{crime['DESC']}', """ \
+                            f"""location = '{location}', sector = '{crime['SECTOR']}', zone = '{crime["ZONE"]}', rd = '{crime["RD"]}' WHERE incident = '{expanded_incident}'"""
 
-        except Exception as e:
-            print(f"Exception occurred: {type(e).__name__}: {str(e)}")
-            # traceback.print_exc()
+                connection.execute(text(query))
+                connection.commit()
 
-    query = f"SELECT count(*) AS exact_count FROM orange_crimes"
-    result = connection.execute(text(query)).fetchone()
-    print("Orange County crimes database updated.")
-    print(f"Current number of entries in database: {result[0]}")
-    connection.close()
+            except Exception as e:
+                # Roll back so one failed statement doesn't leave the transaction aborted for
+                # every remaining row and the count query below.
+                connection.rollback()
+                print(f"Exception occurred: {type(e).__name__}: {str(e)}")
+                # traceback.print_exc()
+
+        query = f"SELECT count(*) AS exact_count FROM orange_crimes"
+        result = connection.execute(text(query)).fetchone()
+        print("Orange County crimes database updated.")
+        print(f"Current number of entries in database: {result[0]}")
 
 def backup_tables(engine: Engine) -> None:
     orlando_list = pd.read_sql_table("orlando_crimes", engine)

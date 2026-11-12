@@ -115,48 +115,48 @@ class UCFCrimeLogLoader:
                     "disposition": 3, "report_dt": 4, "start_dt": 5, 
                     "end_dt": 6, "address": 7}
         
-        connection = self.engine.connect()
+        # The context manager rolls back and returns the connection to the pool even if an
+        # exception (e.g. from geocoding or a failed statement) escapes the loop.
+        with self.engine.connect() as connection:
+            for crime in self.crimes_list:
+                if len(crime) == 8:
+                    case_id = crime[columns['case_id']]
+                    query = f"SELECT * FROM crimes WHERE case_id = '{case_id}'"
+                    result = connection.execute(text(query))
 
-        for crime in self.crimes_list:
-            if len(crime) == 8:
-                case_id = crime[columns['case_id']]
-                query = f"SELECT * FROM crimes WHERE case_id = '{case_id}'"
-                result = connection.execute(text(query))
+                    address = crime[columns['address']].replace("'", "''")
+                    title = crime[columns['title']].replace("'", "''")
 
-                address = crime[columns['address']].replace("'", "''")
-                title = crime[columns['title']].replace("'", "''")
+                    try:
+                        report_dt = datetime.strptime(crime[columns['report_dt']], "%m/%d/%y %H:%M").strftime("%Y-%m-%dT%H:%M:%SZ")
+                        start_dt = datetime.strptime(crime[columns['start_dt']], "%m/%d/%y %H:%M").strftime("%Y-%m-%dT%H:%M:%SZ")
+                        end_dt = datetime.strptime(crime[columns['end_dt']], "%m/%d/%Y %H:%M").strftime("%Y-%m-%dT%H:%M:%SZ")
 
-                try:
-                    report_dt = datetime.strptime(crime[columns['report_dt']], "%m/%d/%y %H:%M").strftime("%Y-%m-%dT%H:%M:%SZ")
-                    start_dt = datetime.strptime(crime[columns['start_dt']], "%m/%d/%y %H:%M").strftime("%Y-%m-%dT%H:%M:%SZ")
-                    end_dt = datetime.strptime(crime[columns['end_dt']], "%m/%d/%Y %H:%M").strftime("%Y-%m-%dT%H:%M:%SZ")
+                    except ValueError:
+                        print(crime)
+                        continue
 
-                except ValueError:
-                    print(crime)
-                    continue
-                
-                # If crime is not already in database (indicated by case ID), get_lat_lng_from_address() and address_to_place() 
-                # are called to generate lat, lng, and place name from address. If the crime's already present, they are not updated
-                # when the crime is updated instead of inserted.
-                if result.rowcount == 0:
-                    lat, lng = utils.google_geocoder(f"{crime[columns['address']]}, ORLANDO, FL", self.GMAPS_API_KEY)
-                    place = utils.address_to_place(crime[columns['address']], lat, lng, self.GMAPS_API_KEY).replace("'", "''")
+                    # If crime is not already in database (indicated by case ID), get_lat_lng_from_address() and address_to_place()
+                    # are called to generate lat, lng, and place name from address. If the crime's already present, they are not updated
+                    # when the crime is updated instead of inserted.
+                    if result.rowcount == 0:
+                        lat, lng = utils.google_geocoder(f"{crime[columns['address']]}, ORLANDO, FL", self.GMAPS_API_KEY)
+                        place = utils.address_to_place(crime[columns['address']], lat, lng, self.GMAPS_API_KEY).replace("'", "''")
 
-                    lat_lng_header = f", lat, lng" if lat and lng else ""
-                    lat_lng_insert = f", {lat}, {lng}" if lat and lng else ""
-                    query = f"INSERT INTO crimes (case_id, disposition, title, campus, address, place{lat_lng_header}, report_dt, start_dt, end_dt) " \
-                            f"VALUES ('{case_id}', '{crime[columns['disposition']]}', '{title}', '{crime[columns['campus']]}', '{address}', " \
-                            f"'{place}'{lat_lng_insert}, '{report_dt}', '{start_dt}', '{end_dt}')"
-                else:
-                    query = f"UPDATE crimes SET report_dt = '{report_dt}', title = '{title}', " \
-                            f"start_dt = '{start_dt}', end_dt = '{end_dt}', address = '{address}', " \
-                            f"disposition = '{crime[columns['disposition']]}', campus = '{crime[columns['campus']]}' WHERE case_id = '{case_id}'"
+                        lat_lng_header = f", lat, lng" if lat and lng else ""
+                        lat_lng_insert = f", {lat}, {lng}" if lat and lng else ""
+                        query = f"INSERT INTO crimes (case_id, disposition, title, campus, address, place{lat_lng_header}, report_dt, start_dt, end_dt) " \
+                                f"VALUES ('{case_id}', '{crime[columns['disposition']]}', '{title}', '{crime[columns['campus']]}', '{address}', " \
+                                f"'{place}'{lat_lng_insert}, '{report_dt}', '{start_dt}', '{end_dt}')"
+                    else:
+                        query = f"UPDATE crimes SET report_dt = '{report_dt}', title = '{title}', " \
+                                f"start_dt = '{start_dt}', end_dt = '{end_dt}', address = '{address}', " \
+                                f"disposition = '{crime[columns['disposition']]}', campus = '{crime[columns['campus']]}' WHERE case_id = '{case_id}'"
 
-                connection.execute(text(query))
-                connection.commit()
+                    connection.execute(text(query))
+                    connection.commit()
 
-        print("Crime database updated.")
-        connection.close()
+            print("Crime database updated.")
 
     # Simple function to copy current database to pandas DataFrame, then insert that DataFrame to a
     # backup CSV file.

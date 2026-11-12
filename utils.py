@@ -13,6 +13,7 @@ import requests
 import editdistance
 from math import radians, sin, cos, sqrt, atan2
 from datetime import datetime
+from functools import lru_cache
 from sqlalchemy import create_engine
 from sqlalchemy.engine.base import Engine
 from configparser import ConfigParser
@@ -39,9 +40,19 @@ async def bot_help(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed)
 
+@lru_cache(maxsize=None)
+def _get_engine(db_uri: str) -> Engine:
+    '''
+    Create one engine (and therefore one connection pool) per database URI for the life of the
+    process. Creating a new engine per call leaves each engine's pooled connections open until
+    garbage collection, which slowly exhausts the server's max_connections.
+    pool_pre_ping discards pooled connections the server has dropped while the bot sat idle.
+    '''
+    return create_engine(db_uri, pool_pre_ping=True)
+
 def setup_db(main_config: ConfigParser) -> Engine:
     '''
-    Connect to the PostgreSQL database
+    Return the shared engine for the PostgreSQL database. Safe to call repeatedly.
     '''
     host = main_config.get('POSTGRESQL', 'host')
     database = main_config.get('POSTGRESQL', 'database')
@@ -49,9 +60,8 @@ def setup_db(main_config: ConfigParser) -> Engine:
     password = main_config.get('POSTGRESQL', 'password')
 
     db_uri = f'postgresql://{user}:{password}@{host}/{database}'
-    engine = create_engine(db_uri)
 
-    return engine
+    return _get_engine(db_uri)
 
 def is_valid_date(date_string: str) -> bool:
     '''
