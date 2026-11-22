@@ -12,7 +12,7 @@ import pandas as pd
 from typing import Optional
 import discord
 from discord.ext import commands
-from datetime import datetime
+from datetime import date, datetime
 from image import generate_image, generate_image_all, generate_hourly_heatmap
 from sqlalchemy.engine.base import Engine
 from sqlalchemy import text
@@ -70,6 +70,11 @@ async def crime_sender(channel: TextChannel, crime: pd.Series) -> None:
 
     await channel.send(embed=embed, file=discord.File('caseout.png'))
 
+def _find_crimes(engine: Engine, column: str, value: str | date) -> pd.DataFrame:
+    query = text(f"SELECT * FROM crimes WHERE {column} = :value")
+    return pd.read_sql_query(query, engine, params={"value": value})
+
+
 async def crime_send_sql(interaction: Optional[discord.Interaction], 
                         client: commands.Bot, 
                         command_arg: str, 
@@ -77,56 +82,41 @@ async def crime_send_sql(interaction: Optional[discord.Interaction],
                         engine: Engine,
                         ) -> None:
     
-    # Open necessary json files.
     with open('locations.json', 'r') as f:
         locations = json.load(f)
 
-    with open('crime_list.json', 'r') as f:
-        crime_list = json.load(f)
-    
     command_arg = command_arg.upper()
     if utils.is_valid_date(command_arg):
         try:
-            date_str = datetime.strptime(command_arg, "%m/%d/%y").strftime("%A, %B %d, %Y")
-            command_arg = datetime.strptime(command_arg, "%m/%d/%y").strftime("%Y-%m-%d")
+            report_date = datetime.strptime(command_arg, "%m/%d/%y")
         except ValueError:
-            date_str = datetime.strptime(command_arg, "%m/%d/%Y").strftime("%A, %B %d, %Y")
-            command_arg = datetime.strptime(command_arg, "%m/%d/%Y").strftime("%Y-%m-%d")
+            report_date = datetime.strptime(command_arg, "%m/%d/%Y")
 
-        # Respond to interaction if the command was triggered by user. If not, then the command was
-        # executed automatically for daily crime listing.
+        date_str = report_date.strftime("%A, %B %d, %Y")
         if interaction:
             await interaction.response.send_message(f"Reported Crimes for {date_str}")
         else:
             await channel.send(f"Reported Crimes for {date_str}")
 
-        query_param = "report_dt::date"
-    
-    # If command argument is a crime title or disposition, dataframe key is set to either title or
-    # disposition accordingly.
-    elif crime_list.get(command_arg):
-        query_param = "title"
+        query_matches = _find_crimes(engine, "report_dt::date", report_date.date())
+    elif not (query_matches := _find_crimes(engine, "title", command_arg)).empty:
         await interaction.response.send_message(f"Reported Crimes for {command_arg.title()}")
 
-    elif len(pd.read_sql_query(f"SELECT * FROM crimes WHERE disposition = '{command_arg}';", engine)) > 0:
-        query_param = "disposition"
+    elif not (query_matches := _find_crimes(engine, "disposition", command_arg)).empty:
         await interaction.response.send_message(f"Reported Crimes with status {command_arg.title()}")
 
-    elif command_arg.upper() in locations.keys():
-        query_param = "address"
+    elif command_arg in locations:
         await interaction.response.send_message(f"Reported Crimes at {command_arg.title()}")
+        query_matches = _find_crimes(engine, "address", command_arg)
 
     elif place_name := next((place for place in locations.values() if place.lower() == command_arg.lower()), None):
-        query_param = "place"
-        command_arg = place_name
-        await interaction.response.send_message(f"Reported Crimes at {command_arg.title()}")
+        await interaction.response.send_message(f"Reported Crimes at {place_name.title()}")
+        query_matches = _find_crimes(engine, "place", place_name)
 
     else:
         return await interaction.response.send_message("Please search for a crime by type, valid date, or valid location.",
                                                         ephemeral=True)
 
-    query = f"SELECT * FROM crimes WHERE {query_param} = '{command_arg}';"
-    query_matches = pd.read_sql_query(query, engine)
     crimeCount = len(query_matches)
 
     # For all crimes in matches, crime_sender sends as Discord embed.
@@ -192,24 +182,31 @@ async def list_locations(interaction: discord.Interaction, client: commands.Bot,
     embeds.append(embed)
     await interaction.response.send_message(embeds=embeds)
 
-async def list_crimes(interaction: discord.Interaction, client: commands.Bot, channel_id: int) -> None:
+async def list_crimes(interaction: discord.Interaction, client: commands.Bot,
+                      channel_id: int, main_config: ConfigParser) -> None:
     '''
-    Crimes json is listed as Discord embed pages.
+    List crime types and their counts as Discord embed pages.
     '''
 
     if not await is_channel(interaction, client, channel_id):
         return
-    
+
     await interaction.response.defer()
-    with open('crime_list.json', 'r') as f:
-        crime_list = json.load(f)
-        
+    engine = utils.setup_db(main_config)
+    query = text("""
+        SELECT COALESCE(title, 'null') AS title, COUNT(*) AS total
+        FROM crimes
+        GROUP BY crimes.title
+        ORDER BY title
+    """)
+    crime_counts = pd.read_sql_query(query, engine)
+
     fieldCount = 0
     page = 1
     color = discord.Color.blue()
 
     embed = discord.Embed(title=f"All Crime Names in Database (Page {page}):", color=color)
-    for key, value in crime_list.items():
+    for title, total in crime_counts.itertuples(index=False, name=None):
         fieldCount += 1
         if (fieldCount >= 25):
             page += 1
@@ -217,7 +214,7 @@ async def list_crimes(interaction: discord.Interaction, client: commands.Bot, ch
             embed = discord.Embed(title=f"All Crime Names in Database (Page {page}):", color=color)
             fieldCount = 0
             
-        embed.add_field(name=key, value=f"Number of crimes in database: {value}", inline=False)
+        embed.add_field(name=title, value=f"Number of crimes in database: {total}", inline=False)
 
     await interaction.followup.send(embed=embed)
 

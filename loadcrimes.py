@@ -12,8 +12,6 @@ import pandas as pd
 import requests
 import re
 from datetime import datetime, date
-import json
-from datetime import datetime
 from configparser import ConfigParser
 from sqlalchemy import text
 
@@ -169,31 +167,6 @@ class UCFCrimeLogLoader:
         crimes_df.to_csv(f"./backups/{backup_csv_name}")
         print("Crime CSV backed up.")
 
-    # Load list of crimes by crime type and status
-    def load_crime_and_status_lists(self) -> None:
-        crimes_df = pd.read_sql_table("crimes", self.engine)
-
-        crime_list = {}
-        status_list = {}
-        for index, crime in crimes_df.iterrows():
-            if crime["title"] not in crime_list.keys():
-                crime_list[crime["title"]] = 1
-            else:
-                crime_list[crime["title"]] += 1
-
-            if crime["disposition"] not in status_list.keys():
-                status_list[crime["disposition"]] = 1
-            else:
-                status_list[crime["disposition"]] += 1
-
-        with open('crime_list.json', 'w') as f:
-            json.dump(crime_list, f, indent=4)
-
-        with open('status_list.json', 'w') as f:
-            json.dump(status_list, f, indent=4)
-
-        print("Crime and status lists loaded.")
-
     # Requests the url of the daily crime log, opens the file, calls PdfReader to read the pdf's
     # contents, calls the tokenizer and parser, then adds the parsed list to the database.
     def __call__(self) -> None:
@@ -223,7 +196,6 @@ class UCFCrimeLogLoader:
 
         self.update_db()
         self.backup_crimes()
-        self.load_crime_and_status_lists()
 
  
 if __name__ == "__main__":

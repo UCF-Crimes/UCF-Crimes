@@ -64,7 +64,7 @@ async def help(interaction: discord.Interaction):
 @client.tree.command(name='crimes', description="Search for all available crimes in the database. Search by date, location, or status.")
 async def crimes(interaction: discord.Interaction, parameter: str):
     if parameter == "all":
-        await list_crimes(interaction, client, bot_channel_id)
+        await list_crimes(interaction, client, bot_channel_id, main_config)
     else:
         await crime_send(interaction, client, parameter, bot_channel_id, main_config)
 
