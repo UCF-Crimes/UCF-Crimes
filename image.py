@@ -16,6 +16,8 @@ import os
 import io
 import discord
 import math
+import asyncio
+from sqlalchemy.engine.base import Engine
 
 # CARTO basemap key. Kept in config.ini so it stays out of source. Without it
 # CARTO still serves tiles, but stamped "API KEY REQUIRED", so warn rather than
@@ -92,27 +94,59 @@ def generate_image_all(crimes: pd.DataFrame) -> None:
     image = context.render_cairo(1080, 1080)
     image.write_to_png("caseall.png")
 
-async def generate_hourly_heatmap(calls: pd.DataFrame, channel: discord.TextChannel, OSM_USER_AGENT: str, OSM_REFERER: str, zoom: int):
+HOURLY_MAP_CENTER = (28.55, -81.39)
+HOURLY_MAP_SIZE = (1366, 768)  # pixel size folium's _to_png renders at
+
+def _fits_view(points: list, center: tuple[float, float], zoom: int, margin: int = 25) -> bool:
+    '''True if every (lat, lng) lands inside the rendered frame at this center/zoom (Web Mercator).'''
+    def to_px(lat, lng):
+        scale = 256 * 2 ** zoom
+        siny = math.sin(math.radians(lat))
+        return (lng + 180) / 360 * scale, (0.5 - math.log((1 + siny) / (1 - siny)) / (4 * math.pi)) * scale
+    cx, cy = to_px(*center)
+    half_w, half_h = HOURLY_MAP_SIZE[0] / 2 - margin, HOURLY_MAP_SIZE[1] / 2 - margin
+    return all(abs(x - cx) <= half_w and abs(y - cy) <= half_h for x, y in (to_px(lat, lng) for lat, lng, _ in points))
+
+def _render_hourly_png(heat_map_data: list, zoom: int) -> None:
+    '''Build and screenshot the folium map. Blocking (headless browser), so run it in a thread.'''
     # folium's built-in "CartoDB Voyager" is the unkeyed endpoint, which comes back
     # watermarked, so use the keyed URL built above.
     m = folium.Map(
-        location=[28.55, -81.39],
+        location=list(HOURLY_MAP_CENTER),
         zoom_start=zoom,
         tiles=CARTO_VOYAGER_FOLIUM_URL,
         attr=CARTO_ATTRIBUTION,
     )
-    heat_map_data = []
-
-    for _, call in calls.iterrows():
-        location = utils.titlize(call['location'].replace("BLOCK ", ""))
-        lat, lng = utils.osm_geocoder(location, OSM_USER_AGENT, OSM_REFERER)
-        if lat and lng:
-            heat_map_data.append([lat, lng, 0.3])
-
     HeatMap(heat_map_data).add_to(m)
     img_data = m._to_png(5)
     img = Image.open(io.BytesIO(img_data))
     img.save('hourly_map.png')
+
+async def generate_hourly_heatmap(calls: pd.DataFrame, channel: discord.TextChannel, OSM_USER_AGENT: str, OSM_REFERER: str,
+                                  zoom: int, policedpt: str, engine: Engine):
+    '''
+    Geocode the hour's calls and post a heatmap. Locations come from the geocode cache (filled
+    every 10 minutes by orlando_orange.py), so usually only new ones hit Nominatim.
+    Blocking work runs in threads so the Discord heartbeat keeps going.
+    '''
+    def geocode_all() -> list:
+        points = []
+        for location in calls['location']:
+            queries = utils.format_call_location(location, policedpt)
+            lat, lng = utils.geocode_cached(engine, queries, OSM_USER_AGENT, OSM_REFERER)
+            if lat is not None and lng is not None:
+                points.append([lat, lng, 0.3])
+        return points
+
+    heat_map_data = await asyncio.to_thread(geocode_all)
+
+    # Zoom out one level if calls fall outside the default frame (e.g. OPD's Lake Nona/airport area
+    # at zoom 12), but no further, so one bad geocode far away can't shrink the whole map.
+    if heat_map_data and not _fits_view(heat_map_data, HOURLY_MAP_CENTER, zoom):
+        zoom -= 1
+
+    print(f"Hourly heatmap ({policedpt}): plotted {len(heat_map_data)}/{len(calls)} calls at zoom {zoom}.")
+    await asyncio.to_thread(_render_hourly_png, heat_map_data, zoom)
 
     await channel.send(file=discord.File("./hourly_map.png"))
 
